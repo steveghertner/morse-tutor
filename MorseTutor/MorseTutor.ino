@@ -12,8 +12,17 @@
                 >> THIS VERSION UNDER DEVELOPMENT <<<
 
  **************************************************************************/
-
-
+/* Modifications by Steve Ghertner WD4CFN
+  ChangeLog:
+  9-20-2019:  modified default callsign, default start speed, pitch, key type default
+  9-21-2019:  working on improving iambic keying by modifying the software to capture and buffer
+              a paddle press while sending an element (a dit or dah).  
+              add updateSendState(), sendDit(), sendDah(), and modified paddleInput() to 
+              include not only checking for dit() or dah() (paddle presses) but also a 
+              dit or dah in the buffer.  Also, added global variables and defines associated
+              with these functions to remove the use of a blocking delay() while
+              sending an element.
+*/
 //===================================  INCLUDES ========================================= 
 #include "Adafruit_GFX.h"
 #include "Adafruit_ILI9341.h"
@@ -37,11 +46,11 @@
 #define SCREEN_ROTATION     3                     // landscape mode: use '1' or '3' 
 
 //===================================  Morse Code Constants =============================
-#define MYCALL          "W8BH"                    // your callsign for splash scrn & QSO
-#define DEFAULTSPEED       13                     // character speed in Words per Minute
+#define MYCALL          "WD4CFN"//"W8BH"                    // your callsign for splash scrn & QSO
+#define DEFAULTSPEED       28                     // character speed in Words per Minute
 #define MAXSPEED           50                     // fastest morse speed in WPM
 #define MINSPEED            3                     // slowest morse speed in WPM
-#define DEFAULTPITCH     1200                     // default pitch in Hz of morse audio
+#define DEFAULTPITCH     700                     // default pitch in Hz of morse audio
 #define MAXPITCH         2800                     // highest allowed pitch
 #define MINPITCH          300                     // how low can you go
 #define WORDSIZE            5                     // number of chars per random word
@@ -78,6 +87,12 @@
 #define SELECTBG        WHITE                     // Selected Menu background color
 #define TEXTCOLOR      YELLOW                     // Default non-menu text color
 #define ELEMENTS(x) (sizeof(x) / sizeof(x[0]))    // Handy macro for determining array sizes
+
+//================================== Iambic Keying improvement=============================
+#define NONE  0
+#define DIT   1
+#define DAH   2
+#define ELE_SPACE 3
 
 Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC);
 
@@ -184,7 +199,8 @@ int pitch       = DEFAULTPITCH;
 int kochLevel   = 1;
 int score       = 0;
 int xWordSpaces = 0;
-bool usePaddles = false;
+//bool usePaddles = false;
+bool usePaddles=true;
 bool paused     = false;
 
 //===================================  Menu Variables ===================================
@@ -194,7 +210,10 @@ char *menu0[]    = {" Koch    ", " Letters ", " Words   ", " Numbers ", " Mixed 
 char *menu1[]    = {" Practice", " Copy One", " Copy Two", " Cpy Word", " Cpy Call", " Flashcrd", " Two-Way ", " Exit    "};
 char *menu2[]    = {" Speed   ", " Chk Spd ", " Tone    ", " Key     ", " Defaults", " Exit    "};
 
-
+//=======================================Variables added for better Iambic sending 9-21-2019
+int sendState=NONE; // used by sendingDah() and sendingDit(), 4 states NONE, DIT, DAH, ELE_SPACE
+int ditDahBuffer=NONE; //buffer dit or dah if paddle pressed while sending the other element, 3 choices DIT, DAH or NONE
+long  keyStart; //for timing of element sending
 //===================================  Rotary Encoder Code  =============================
 
 /* 
@@ -346,6 +365,52 @@ void wordSpace()
   delay(4*extracharDit());                        // 7 total (last char includes 3)
   if (xWordSpaces)                                // any user-specified delays?
     delay(7*extracharDit()*xWordSpaces);          // yes, so additional wait between words                               
+}
+
+
+void updateSendState(int spaces){
+  if (ditPeriod*spaces<=millis()-keyStart){  //time expired?
+    if(sendState==DIT || sendState==DAH)  //if so, update state
+      sendState=ELE_SPACE;  //if DIT or DAH then send element space
+    else
+      sendState=NONE;  //if state=element space, then reset the state
+  }
+}
+
+void sendDit(){     //send a Dit
+  sendState=DIT;   //set current State
+  if (ditDahBuffer==DIT)  //if got here via buffer
+    ditDahBuffer=NONE;  //then clear buffer
+  keyDown();  //key audio
+  keyStart=millis(); //start sending timer
+  while(sendState==DIT){ //loop until finished sending
+    updateSendState(1);  //check state timer
+    if(dahPressed())  //check if paddle pushed
+      ditDahBuffer=DAH; //update buffer
+  }
+  keyStart=millis();  //start send timer for element space
+  keyUp(); //turn off audio
+  while(sendState==ELE_SPACE){   //
+    updateSendState(1); //check state timer
+  }
+}
+
+void sendDah(){  //send a dah
+  sendState=DAH;   //set current State
+  if (ditDahBuffer==DAH)  //if got here via buffer
+    ditDahBuffer=NONE;  //then clear buffer
+  keyDown();  //key audio
+  keyStart=millis(); //start sending timer
+  while(sendState==DAH){ //loop until finished sending
+    updateSendState(3);  //check state timer
+    if(ditPressed())  //check if paddle pushed
+      ditDahBuffer=DIT; //update buffer
+  }
+  keyStart=millis();  //start send timer for element space
+  keyUp(); //turn off audio
+  while(sendState==ELE_SPACE){   //
+    updateSendState(1); //check state timer
+  }
 }
 
 void dit() {                                      // send a dit by:
@@ -812,15 +877,18 @@ char paddleInput()                                // monitor paddles & return a 
   unsigned long start = millis();
   while (!button_pressed)
   {
-    if (ditPressed())                             // user pressed dit paddle:
+    if (ditPressed()||(ditDahBuffer==DIT))       // user pressed dit paddle or DIT in buffer changed for iambic:
     {
-      dit();                                      // so sound it out
+      //dit();                                    //changed for iambic
+      sendDit();                                  //changed for iambic    
+      // so sound it out
       code += (1<<bit++);                         // add a '1' element to code
       start = millis();                           // and reset timeout.
     }
-    if (dahPressed())                             // user pressed dah paddle:
+    if (dahPressed()||(ditDahBuffer==DAH))       // user pressed dah paddle or DIT in buffer changed for iambic
     {
-      dah();                                      // so sound it tout
+      //dah();                                      // so sound it tout //changed for iambic
+      sendDah();                                  //changed for iambic
       bit++;                                      // add '0' element to code
       start = millis();                           // and reset the timeout.
     }
